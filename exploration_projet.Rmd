@@ -1,0 +1,453 @@
+---
+title: "Exploration et description de la base de notre projet"
+output:
+  pdf_document:
+    latex_engine: xelatex
+    number_sections: true
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
+                      fig.width = 7, fig.height = 4, fig.align = "center",
+                      out.width = "80%", dev = "cairo_pdf")
+```
+
+```{r include=FALSE}
+library(tidyverse)
+library(scales)
+library(knitr)
+
+theme_set(
+  theme_minimal(base_size = 12) +
+    theme(panel.grid.minor = element_blank(),
+          panel.grid.major.y = element_line(colour = "grey90"),
+          panel.grid.major.x = element_blank(),
+          plot.title = element_text(face = "bold"),
+          plot.caption = element_text(colour = "grey50", size = 9))
+)
+couleurs_puce <- c("ISAC v1" = "#8C9A82", "ISAC v2" = "#D7D3C8", "ALEX" = "#C77855")
+```
+
+# Contexte et présentation de la base de donnée
+
+L'allergie est classée par l'OMS au 4ᵉ rang mondial des maladies chroniques. En France, une personne sur trois est allergique, et cette proportion pourrait atteindre 50 % d'ici 2050. Les allergies alimentaires progressent particulièrement vite : leur prévalence a doublé en dix ans. Pourtant, le diagnostic reste long (sept ans en moyenne), notamment parce que le nombre d'allergologues diminue.
+
+Pour aider au diagnostic, les laboratoires utilisent des puces à allergènes : à partir d'une prise de sang, elles mesurent le taux d'anticorps IgE dirigés contre des centaines d'allergènes. Un taux élevé indique une sensibilisation à cet allergène.
+
+La question posée est la suivante : **comment utiliser ces données pour définir des profils allergiques, identifier des facteurs de sévérité et comprendre comment les profils IgE peuvent aider à prédire la sévérité des allergies ?**
+
+La base a été constituée entre 2021 et 2023 par la Société Française d'Allergologie, avec 12 laboratoires hospitaliers français.
+
+Elle contient 4 271 patients et 256 colonnes :
+
+- **15 variables démographiques et cliniques** : âge, sexe, région, milieu rural ou urbain, sensibilisation, traitements de la rhinite, de l'asthme et de la dermatite atopique,nsymptômes cutanés, cofacteurs
+- **241 variables biologiques** : chacune correspond à un allergène et contient le taux d'IgE mesuré, en kUA/L. Les allergènes sont nommés selon la nomenclature officielle WHO/IUIS (par exemple `Phl_p_1` pour la fléole des prés, une graminée) et se répartissent en six familles : pollens, acariens et blattes, animaux, aliments, moisissures et venins.
+
+## Import des données sur R
+
+On force `Treatment_of_rhinitis` en texte. Sinon, les cellules qui contiennent plusieurs traitements (`"1,3"` = traitements 1 et 3) seraient lues comme le nombre 1.3. On force aussi les autres par sécurité.
+
+```{r include=FALSE}
+cols_texte <- c("Treatment_of_rhinitis", "Treatment_of_athsma", "Age_of_onsets",
+                "General_cofactors", "Treatment_of_atopic_dematitis")
+
+df_brut <- read.csv2("allergenchipchallenge-data-corrected-final-hdh-sfa.csv",
+                     colClasses = setNames(rep("character", length(cols_texte)), cols_texte),
+                     check.names = FALSE) 
+names(df_brut)[1] <- "Patient_ID"
+#dim(df_brut)
+```
+
+# Préparation des données
+
+On sépare les deux blocs de variables suivants :
+- les colonnes 1 à 15 sont l'identifiant et les variables démographiques et cliniques ;
+- les colonnes 16 à 256 sont les 241 mesures d'IgE spécifiques (kUA/L).
+
+```{r include = FALSE}
+vars_cliniques <- names(df_brut)[1:15]
+vars_ige       <- names(df_brut)[16:256]
+```
+
+Ensuite on recode les variables cliniques : 
+
+Dans le dictionnaire, 9 = inconnu. On le transforme en NA pour qu'il ne soit jamais compté comme une vraie valeur. Les codes 0/1 deviennent des facteurs avec des libellés lisibles.
+
+```{r include = FALSE}
+# "0" -> Non, NA -> NA, tout le reste (y compris "1,3") -> Oui
+au_moins_un <- function(x) {
+  x <- str_trim(x)
+  case_when(x %in% c("9", "", NA) ~ NA_character_,
+            x == "0"              ~ "Non",
+            TRUE                  ~ "Oui") |>
+    factor(levels = c("Non", "Oui"))
+}
+
+df <- df_brut |>
+  mutate(
+    Chip_Type   = recode(Chip_Type, ISAC_V1 = "ISAC v1", ISAC_V2 = "ISAC v2") |>
+                  factor(levels = c("ISAC v1", "ISAC v2", "ALEX")),
+    Gender      = factor(Gender, levels = c(0, 1), labels = c("Femme", "Homme")),
+    Rural_or_urban_area = factor(na_if(Rural_or_urban_area, 9),
+                                 levels = c(0, 1), labels = c("Rural", "Urbain")),
+    Sensitization = factor(Sensitization, levels = c(0, 1),
+                           labels = c("Non sensibilisé", "Sensibilisé")),
+    Skin_Symptoms = factor(na_if(Skin_Symptoms, 9), levels = c(0, 1),
+                           labels = c("Non", "Oui")),
+
+    across(c(Treatment_of_rhinitis, Treatment_of_athsma, Treatment_of_atopic_dematitis,
+             General_cofactors, Age_of_onsets),
+           ~ na_if(str_remove_all(.x, " "), "9")),
+
+    trt_rhinite   = au_moins_un(Treatment_of_rhinitis),
+    trt_asthme    = au_moins_un(Treatment_of_athsma),
+    trt_dermatite = au_moins_un(Treatment_of_atopic_dematitis),
+    cofacteur     = au_moins_un(General_cofactors)
+  )
+```
+
+De plus, un allergène est considéré comme positif à partir de 0,3, seuil de positivité indiqué par les fabricants des puces ISAC (Thermo Fisher) et ALEX (MacroArray Diagnostics).
+
+```{r include = FALSE}
+#mettre les IgE en format long
+seuil_positif <- 0.3
+
+ige_long <- df |>
+  select(Patient_ID, Chip_Type, all_of(vars_ige)) |>
+  pivot_longer(all_of(vars_ige), names_to = "allergene", values_to = "ige") |>
+  mutate(ige = if_else(ige < 0, NA_real_, ige)) |>
+  filter(!is.na(ige)) |>                      # on ne garde que les allergènes testés
+  mutate(positif = ige >= seuil_positif)
+
+nrow(ige_long)
+sum(df_brut[vars_ige] < 0, na.rm = TRUE)      # nombre de valeurs à -1 écartées
+```
+
+Par la suite, j'associe chaque allergène à sa famille : $
+
+Le préfixe du nom (`Phl_p`, `Der_p`…) suit la nomenclature WHO/IUIS. On le regroupe dans les 6 familles du défi, plus une catégorie **Autres** (latex, CCD, etc.).
+
+Attention à quelques espèces qui ont à la fois des composants **respiratoires** et **alimentaires** :
+
+- noisetier (`Cor_a`) : `Cor_a_1.0101`, `Cor_a_1.0103` et `Cor_a_pollen` sont du pollen ; les autres composants correspondent à la noisette ;
+- noyer (`Jug_r`) : `Jug_r_pollen` est du pollen ; le reste correspond à la noix ;
+- vache, cheval, chèvre : les composants « poils/épithélium » relèvent de la famille Animaux, le lait et la viande de la famille Aliments.
+
+```{r include = FALSE}
+pollen_graminees <- c("Phl_p", "Cyn_d", "Lol_p", "Lol_spp")
+pollen_arbres    <- c("Aln_g", "Bet_v", "Cry_j", "Cup_a", "Cup_s", "Jun_a", "Ole_e",
+                      "Pla_a", "Fra_e", "Fag_s", "Mor_r", "Ail_a", "Aca_m", "Bro_pa")
+pollen_herbacees <- c("Amb_a", "Art_v", "Che_a", "Par_j", "Pla_l", "Sal_k", "Ama_r",
+                      "Mer_a", "Can_s")
+acariens_blattes <- c("Der_p", "Der_f", "Blo_t", "Lep_d", "Gly_d", "Aca_s", "Bla_g")
+animaux          <- c("Can_f", "Fel_d", "Mus_m", "Cav_p", "Ory_c", "Mes_a")
+moisissures      <- c("Alt_a", "Asp_f", "Cla_h", "Mala_s")
+venins           <- c("Api_m", "Ves_v", "Pol_d", "Dol_spp")
+autres           <- c("Hev_b", "MUXF3", "Hom_s", "Arg_r", "Fic_b", "Chi_spp")
+# Tout le reste = aliments
+
+table_familles <- tibble(allergene = vars_ige) |>
+  mutate(
+    espece = str_extract(allergene, "^[A-Za-z]+_[a-z]+|^[A-Za-z-]+"),
+    sous_famille = case_when(
+      allergene %in% c("Cor_a_1.0101", "Cor_a_1.0103", "Cor_a_pollen",
+                       "Jug_r_pollen")                       ~ "Pollens - arbres",
+      allergene %in% c("Bos_d_2", "Cap_h_epithelia",
+                       "Equ_c_1", "Equ_c_3", "Equ_c_4")      ~ "Animaux",
+      espece %in% pollen_graminees                           ~ "Pollens - graminées",
+      espece %in% pollen_arbres                              ~ "Pollens - arbres",
+      espece %in% pollen_herbacees                           ~ "Pollens - herbacées",
+      espece %in% acariens_blattes                           ~ "Acariens & blattes",
+      espece %in% animaux                                    ~ "Animaux",
+      espece %in% moisissures                                ~ "Moisissures & levures",
+      espece %in% venins                                     ~ "Venins",
+      espece %in% autres                                     ~ "Autres",
+      TRUE                                                   ~ "Aliments"
+    ),
+    famille = if_else(str_starts(sous_famille, "Pollens"), "Pollens", sous_famille) |>
+      factor(levels = c("Pollens", "Acariens & blattes", "Animaux", "Aliments",
+                        "Moisissures & levures", "Venins", "Autres"))
+  )
+
+count(table_familles, famille, sous_famille) |> kable()
+
+ige_long <- ige_long |> left_join(table_familles, by = "allergene")
+
+couleurs_famille <- c("Pollens" = "#eda100", "Acariens & blattes" = "#6250d6",
+                      "Animaux" = "#eb6834", "Aliments" = "#2a78d6",
+                      "Moisissures & levures" = "#008300", "Venins" = "#e34948",
+                      "Autres" = "#9a9a9a")
+```
+
+# Description de la base
+
+## Vue d'ensemble
+
+```{r echo=FALSE}
+tibble(
+  Indicateur = c("Patients", "Variables cliniques et démographiques", "Allergènes (colonnes IgE)",
+                 "Régions (anonymisées)", "Départements (anonymisés)"),
+  Valeur = c(nrow(df), length(vars_cliniques) - 1, length(vars_ige),
+             n_distinct(df$French_Region), n_distinct(df$French_Residence_Department))
+) |> kable()
+```
+
+La base compte 4 271 patients décrits par 14 variables cliniques et démographiques et 241 mesures d'IgE. Les données biologiques sont donc bien plus détaillées que les données cliniques. Les patients viennent de 15 régions et 82 départements, anonymisés.
+
+## Répartition par type de puce
+
+C'est la variable la plus structurante : chaque puce mesure un nombre d'allergènes différent. Toute comparaison entre patients doit en tenir compte.
+
+```{r graph-puces, fig.height = 3, echo=FALSE}
+ggplot(df, aes(y = fct_rev(Chip_Type), fill = Chip_Type)) +
+  geom_bar(width = 0.6) +
+  geom_text(stat = "count", aes(label = after_stat(count)), hjust = -0.2, size = 3.5) +
+  scale_fill_manual(values = couleurs_puce, guide = "none") +
+  scale_x_continuous(expand = expansion(mult = c(0, 0.1))) +
+  labs(title = "Nombre de patients par type de puce", x = NULL, y = NULL) +
+  theme(panel.grid.major.y = element_blank(), panel.grid.major.x = element_line(colour = "grey90"))
+```
+
+```{r echo=FALSE}
+couverture <- ige_long |>
+  distinct(Chip_Type, allergene) |>
+  count(Chip_Type, name = "allergenes_testes")
+
+df |> count(Chip_Type, name = "patients") |>
+  mutate(part = percent(patients / sum(patients), accuracy = 0.1)) |>
+  left_join(couverture, by = "Chip_Type") |>
+  kable(col.names = c("Puce", "Patients", "Part", "Allergènes mesurés"))
+```
+
+Plus de la moitié des patients (2 351, soit 55 %) a été testée avec ISAC v1, contre 1 139 avec ALEX et 781 avec ISAC v2. ALEX mesure pourtant deux fois plus d'allergènes (223 contre 112), et seuls 91 sont communs aux trois puces : les profils ne sont donc pas directement comparables d'une puce à l'autre.
+
+## Démographie
+### Âge
+
+```{r echo=FALSE}
+summary(df$Age)
+
+ggplot(df, aes(x = Age, fill = Chip_Type)) +
+  geom_histogram(binwidth = 5, boundary = 0, colour = "white") +
+  facet_wrap(~ Chip_Type, ncol = 1, scales = "free_y") +
+  scale_fill_manual(values = couleurs_puce, guide = "none") +
+  labs(title = "Distribution de l'âge selon le type de puce",
+       subtitle = "Classes de 5 ans",
+       x = "Âge (années)", y = "Nombre de patients")
+```
+
+La population est jeune : la moitié des patients a moins de 16 ans (âge médian), et l'âge moyen (23 ans) est tiré vers le haut par quelques adultes plus âgés. L'âge n'est pas renseigné pour 61 patients. Les patients testés avec les puces ISAC sont surtout des enfants de 5 à 15 ans, alors qu'ALEX concerne une population plus étalée, avec davantage d'adultes. Le type de puce est donc aussi lié à l'âge des patients.
+
+### Sexe et lieu de vie
+
+```{r echo=FALSE}
+df |>
+  select(Chip_Type, Sexe = Gender, `Lieu de vie` = Rural_or_urban_area) |>
+  pivot_longer(-Chip_Type, names_to = "variable", values_to = "modalite") |>
+  mutate(modalite = fct_na_value_to_level(modalite, level = "Non renseigné")) |>
+  ggplot(aes(x = Chip_Type, fill = modalite)) +
+  geom_bar(position = "fill", width = 0.7, colour = "white") +
+  facet_wrap(~ variable) +
+  scale_y_continuous(labels = percent) +
+  scale_fill_manual(values = c("Femme" = "pink", "Homme" = "lightblue",
+                               "Rural" = "#2a78d6", "Urbain" = "#86b6ef",
+                               "Non renseigné" = "grey80")) +
+  labs(title = "Sexe et lieu de vie selon la puce",
+       x = NULL, y = "Part des patients", fill = NULL)
+```
+
+La répartition par sexe est équilibrée, autour de 50 % de femmes et 50 % d'hommes quelle que soit la puce ; seuls quelques patients ISAC v2 (environ 8 %) n'ont pas de sexe renseigné.
+Le lieu de vie, en revanche, est très souvent manquant : environ 75 % des patients ISAC v1 et ALEX ne l'ont pas, contre 40 % pour ISAC v2. Parmi les patients renseignés, la grande majorité vit en zone urbaine. Cette variable est donc peu exploitable, sauf peut-être pour les patients ISAC v2.
+
+## Variables cliniques
+
+```{r cliniques, fig.height = 5.5, echo = FALSE}
+clin <- df |>
+  select(Chip_Type,
+         `Sensibilisation`         = Sensitization,
+         `Symptômes cutanés`       = Skin_Symptoms,
+         `Traitement rhinite`      = trt_rhinite,
+         `Traitement asthme`       = trt_asthme,
+         `Traitement dermatite`    = trt_dermatite,
+         `Au moins un cofacteur`   = cofacteur) |>
+  mutate(across(-Chip_Type, as.character)) |>
+  pivot_longer(-Chip_Type, names_to = "variable", values_to = "modalite") |>
+  mutate(modalite = replace_na(modalite, "Non renseigné"),
+         modalite = recode(modalite, "Sensibilisé" = "Oui", "Non sensibilisé" = "Non"),
+         modalite = factor(modalite, levels = c("Non renseigné", "Non", "Oui")))
+
+ggplot(clin, aes(y = variable, fill = modalite)) +
+  geom_bar(position = "fill", width = 0.7, colour = "white") +
+  scale_x_continuous(labels = percent) +
+  scale_fill_manual(values = c("Oui" = "#2a78d6", "Non" = "#86b6ef",
+                               "Non renseigné" = "grey85"),
+                    breaks = c("Oui", "Non", "Non renseigné")) +
+  labs(title = "Variables cliniques : réponses et données manquantes",
+       subtitle = "Ensemble des 4 271 patients",
+       x = "Part des patients", y = NULL, fill = NULL) +
+  theme(legend.position = "top", panel.grid.major.y = element_blank(),
+        panel.grid.major.x = element_line(colour = "grey90"))
+```
+
+La grande majorité des patients (84 %) est sensibilisée à au moins un allergène, ce qui correspond à une population recrutée en milieu hospitalier pour des allergies. Les variables de traitement (rhinite, asthme, dermatite) et les symptômes cutanés sont en revanche très souvent manquantes : entre 57 % et 69 % des patients ne sont pas renseignés.
+
+Parmi les patients renseignés, environ un quart à deux sur cinq reçoivent un traitement pour l'asthme ou la rhinite, et plus de la moitié présentent des symptômes cutanés. Enfin, 30 % des patients ont au moins un cofacteur. Ces fortes proportions de données manquantes limitent les analyses croisant clinique et IgE.
+
+## Données manquantes
+
+On compte comme manquant tout NA ou code 9 (inconnu).
+
+```{r echo=FALSE}
+manquants <- df |>
+  transmute(Chip_Type,
+            Age, Gender, Blood_Month_sample, Rural_or_urban_area, Age_of_onsets,
+            Skin_Symptoms, trt_rhinite, trt_asthme, trt_dermatite, cofacteur) |>
+  pivot_longer(-Chip_Type, names_to = "variable", values_transform = as.character) |>
+  group_by(variable) |>
+  summarise(part_manquante = mean(is.na(value))) |>
+  arrange(desc(part_manquante))
+
+ggplot(manquants, aes(x = part_manquante, y = fct_reorder(variable, part_manquante))) +
+  geom_col(fill = "#2a78d6", width = 0.6) +
+  geom_text(aes(label = percent(part_manquante, accuracy = 1)), hjust = -0.2, size = 3.3) +
+  scale_x_continuous(labels = percent, limits = c(0, 1), expand = expansion(mult = c(0, 0.05))) +
+  labs(title = "Part de valeurs manquantes par variable",
+       x = NULL, y = NULL) +
+  theme(panel.grid.major.y = element_blank(), panel.grid.major.x = element_line(colour = "grey90"))
+```
+
+Les variables démographiques sont presque complètes : moins de 3 % de valeurs manquantes pour l'âge, le sexe et le mois de prélèvement. À l'inverse, les variables cliniques sont majoritairement absentes : entre 57 % (symptômes cutanés) et 70 % (lieu de vie) des patients ne sont pas renseignés. Les analyses croisant clinique et IgE porteront donc sur un sous-groupe réduit de patients, ce qui limite la portée des résultats.
+
+Les données manquantes dépendent-elles de la puce, et donc du centre ?
+
+Les données manquantes varient nettement selon la puce. Les patients ISAC v2 sont les mieux renseignés (35 % à 61 % de manquants), alors que les patients ISAC v1 le sont le moins( 69 % à 76 %). ALEX se situe entre les deux, sauf pour le lieu de vie (77 % de manquants).
+Comme chaque puce correspond à certains hôpitaux, la qualité du remplissage dépend du centre : les analyses limitées aux patients renseignés surreprésenteront donc les patients ISAC v2.
+
+```{r manquants-puce, fig.height = 4.5, echo=FALSE}
+df |>
+  transmute(Chip_Type, Rural_or_urban_area, Skin_Symptoms, trt_rhinite,
+            trt_asthme, trt_dermatite, cofacteur) |>
+  pivot_longer(-Chip_Type, names_to = "variable", values_transform = as.character) |>
+  group_by(Chip_Type, variable) |>
+  summarise(part_manquante = mean(is.na(value)), .groups = "drop") |>
+  ggplot(aes(x = Chip_Type, y = variable, fill = part_manquante)) +
+  geom_tile(colour = "white", linewidth = 1) +
+  geom_text(aes(label = percent(part_manquante, accuracy = 1),
+                colour = part_manquante > 0.6), size = 3.5) +
+  scale_fill_gradient(low = "#cde2fb", high = "#184f95", labels = percent, limits = c(0, 1)) +
+  scale_colour_manual(values = c(`TRUE` = "white", `FALSE` = "grey15"), guide = "none") +
+  labs(title = "Données manquantes selon la puce", x = NULL, y = NULL,
+       fill = "Manquant") +
+  theme(panel.grid = element_blank())
+```
+## Les IgE
+### Distribution des valeurs
+
+Les valeurs sont très asymétriques : la grande majorité vaut 0, et quelques-unes sont très élevées.
+
+```{r ige-distrib, echo=FALSE}
+summary(ige_long$ige)
+mean(ige_long$ige == 0)   # part des mesures strictement nulles
+
+ige_long |>
+  filter(ige > 0) |>
+  ggplot(aes(x = ige)) +
+  geom_histogram(bins = 50, fill = "#2a78d6", colour = "white") +
+  geom_vline(xintercept = seuil_positif, linetype = "dashed", colour = "grey30") +
+  annotate("text", x = seuil_positif, y = Inf, label = " seuil 0,3",
+           hjust = 0, vjust = 1.5, size = 3.3, colour = "grey30") +
+  scale_x_log10(labels = label_number(big.mark = " ", decimal.mark = ",")) +
+  labs(title = "Distribution des IgE non nulles (échelle logarithmique)",
+       x = "IgE spécifiques (kUA/L)", y = "Nombre de mesures")
+```
+
+La plupart des mesures (82 %) valent 0. Parmi les autres, beaucoup sont sous le seuil de 0,3, surtout avec la puce ALEX. Au-dessus du seuil, les valeurs s'étalent jusqu'à environ 50 kUA/L, et les plus élevées (jusqu'à 239) viennent uniquement des puces ISAC : les puces n'ont pas la même échelle de mesure.
+
+### Nombre d'allergènes positifs par patient (mono- ou polysensibilisation)
+
+```{r nb-positifs, echo=FALSE}
+nb_pos <- ige_long |>
+  group_by(Patient_ID, Chip_Type) |>
+  summarise(n_positifs = sum(positif), .groups = "drop")
+
+nb_pos |>
+  group_by(Chip_Type) |>
+  summarise(mediane = median(n_positifs), moyenne = round(mean(n_positifs), 1),
+            max = max(n_positifs), `aucun positif` = percent(mean(n_positifs == 0), 1)) |>
+  kable()
+
+ggplot(nb_pos, aes(x = n_positifs, fill = Chip_Type)) +
+  geom_histogram(binwidth = 2, boundary = 0, colour = "white") +
+  facet_wrap(~ Chip_Type, ncol = 1, scales = "free_y") +
+  scale_fill_manual(values = couleurs_puce, guide = "none") +
+  labs(title = "Nombre d'allergènes positifs par patient",
+       subtitle = "ALEX mesure environ deux fois plus d'allergènes : les comptes ne sont pas directement comparables",
+       x = "Nombre d'allergènes ≥ 0,3 kUA/L", y = "Nombre de patients")
+```
+
+Le profil est le même pour les trois puces : beaucoup de patients ont 0 ou très peu d'allergènes positifs, et quelques-uns en ont beaucoup. Sur ISAC v1 et ALEX, la moitié des patients a au moins 11 ou 12 allergènes positifs : la polysensibilisation est donc fréquente. ALEX donne les comptes les plus élevés (jusqu'à 134), ce qui s'explique en
+partie par son nombre plus important d'allergènes testés. ISAC v2 compte le plus de patients sans aucun allergène positif (27 %).
+
+# Premier graphique : les allergènes les plus fréquents
+
+Quels allergènes sensibilisent le plus de patients ?
+
+**Indicateur :** pour chaque allergène, la part des patients testés pour cet allergène qui ont un résultat positif (≥ 0,3 kUA/L). Le dénominateur ne compte que les patients testés, puisqu'un allergène absent de la puce d'un patient n'est pas un résultat négatif. On écarte les allergènes testés chez moins de 500 patients, dont le pourcentage serait trop instable.
+
+```{r top-allergenes, fig.height = 7, echo=FALSE}
+prevalence <- ige_long |>
+  group_by(allergene, famille, sous_famille) |>
+  summarise(n_testes  = n(),
+            n_positifs = sum(positif),
+            part_positifs = n_positifs / n_testes,
+            .groups = "drop") |>
+  filter(n_testes >= 500)
+
+top20 <- prevalence |> slice_max(part_positifs, n = 20)
+
+ggplot(top20, aes(x = part_positifs,
+                  y = fct_reorder(str_replace_all(allergene, "_", " "), part_positifs),
+                  fill = famille)) +
+  geom_col(width = 0.7) +
+  geom_text(aes(label = percent(part_positifs, accuracy = 1)),
+            hjust = -0.15, size = 3.2, colour = "grey20") +
+  scale_x_continuous(labels = percent, expand = expansion(mult = c(0, 0.08))) +
+  scale_fill_manual(values = couleurs_famille, drop = TRUE) +
+  labs(title = "Les 20 allergènes les plus souvent positifs",
+       subtitle = "Part des patients testés ayant des IgE ≥ 0,3 kUA/L",
+       x = "Part des patients testés", y = NULL, fill = "Famille",
+       caption = "Source : Allergen Chip Challenge (SFA / Health Data Hub). Allergènes testés chez au moins 500 patients.") +
+  theme(legend.position = "top",
+        panel.grid.major.y = element_blank(),
+        panel.grid.major.x = element_line(colour = "grey90"))
+```
+
+```{r echo=FALSE}
+#top20 |>
+  #mutate(part_positifs = percent(part_positifs, accuracy = 0.1)) |>
+  #select(Allergène = allergene, Famille = sous_famille, `Patients testés` = n_testes,
+         #`Positifs` = n_positifs, `% positifs` = part_positifs) |>
+  #kable()
+```
+
+### Les mêmes chiffres par famille
+
+Pour chaque famille : la part des patients ayant au moins un allergène positif dans cette famille.
+
+```{r familles-graph, fig.height = 4, echo=FALSE}
+ige_long |>
+  group_by(Patient_ID, famille) |>
+  summarise(au_moins_un = any(positif), .groups = "drop") |>
+  group_by(famille) |>
+  summarise(part = mean(au_moins_un)) |>
+  ggplot(aes(x = part, y = fct_reorder(famille, part), fill = famille)) +
+  geom_col(width = 0.65) +
+  geom_text(aes(label = percent(part, accuracy = 1)), hjust = -0.15, size = 3.4) +
+  scale_x_continuous(labels = percent, expand = expansion(mult = c(0, 0.08))) +
+  scale_fill_manual(values = couleurs_famille, guide = "none") +
+  labs(title = "Part des patients sensibilisés à au moins un allergène de chaque famille",
+       x = NULL, y = NULL) +
+  theme(panel.grid.major.y = element_blank(), panel.grid.major.x = element_line(colour = "grey90"))
+```
+
+

@@ -1,0 +1,153 @@
+---
+title: "projet_tutore_part1"
+author: "anaide"
+date: "2026-10-20"
+output: html_document
+---
+
+```{r}
+datap=read.csv2("C:/Users/anaid/Documents/M2/projet_tutore/allergenchipchallenge-data-corrected-final-hdh-sfa.csv")
+```
+
+```{r}
+dim(datap)
+str(datap[, 1:13])
+summary(datap$Age)
+table(datap$Gender, useNA = "ifany")
+table(datap$French_Region, useNA = "ifany")
+table(datap$Rural_or_urban_area, useNA = "ifany")
+```
+
+librairies :
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(patchwork)
+library(forcats)
+```
+
+```{r}
+table(datap$Gender, useNA = "ifany")
+table(datap$Rural_or_urban_area, useNA = "ifany")
+table(datap$French_Region, useNA = "ifany")
+```
+
+### observation des données :
+
+
+
+```{r}
+boxplot(datap$Age, main = "Age (population totale)", ylab = "Age", col = "lightblue")
+
+datap$Gender <- factor(datap$Gender, levels = c(0, 1), labels = c("Sexe 0", "Sexe 1"))  ### à executer 1 fois seuleent!!!!!
+datap$French_Region <- factor(datap$French_Region)
+datap$French_Residence_Department <- factor(datap$French_Residence_Department)
+
+datap$Rural <- factor(datap$Rural_or_urban_area,
+                      levels = c(0, 1, 9),
+                      labels = c("Zone 0", "Zone 1", "Non renseigné"))
+
+
+```
+
+question: sexe 0= femme? ou homme ? car pas renseigné dans la doc
+
+```{r}
+
+
+
+#Distribution de l'âge
+p1 =ggplot(datap, aes(x = Age)) +
+  geom_histogram(aes(y = after_stat(density)), bins = 30,
+                 fill = "steelblue", color = "white") +
+  geom_density(color = "red", linewidth = 1) +
+  geom_vline(xintercept = mean(datap$Age, na.rm = TRUE), linetype = "dashed") +
+  labs(title = "Distribution de l'âge", x = "Âge", y = "Densité") +
+  theme_minimal()
+
+#Répartition par sexe
+p2 =datap %>%
+  filter(!is.na(Gender)) %>%
+  count(Gender) %>%
+  mutate(pct = n / sum(n) * 100) %>%
+  ggplot(aes(x = Gender, y = n, fill = Gender)) +
+  geom_col(show.legend = FALSE) +
+  geom_text(aes(label = paste0(n, " (", round(pct, 1), "%)")), vjust = -0.3) +
+  labs(title = "Répartition par sexe", x = NULL, y = "Effectif") +
+  theme_minimal()
+
+#Répartition rural / urbain
+p3 =datap %>%
+  count(Rural) %>%
+  mutate(pct = n / sum(n) * 100) %>%
+  ggplot(aes(x = Rural, y = n, fill = Rural)) +
+  geom_col(show.legend = FALSE) +
+  geom_text(aes(label = paste0(n, " (", round(pct, 1), "%)")), vjust = -0.3) +
+  labs(title = "Zone rurale / urbaine", x = NULL, y = "Effectif") +
+  theme_minimal()
+
+#répartition par région
+p4 = datap %>%
+  count(French_Region) %>%
+  ggplot(aes(x = reorder(French_Region, n), y = n)) +
+  geom_col(fill = "darkgreen") +
+  geom_text(aes(label = n), hjust = -0.2) +
+  coord_flip() +
+  labs(title = "Répartition par région", x = NULL, y = "Effectif") +
+  theme_minimal()
+
+#top 15 départements
+p5 = datap %>%
+  count(French_Residence_Department, sort = TRUE) %>%
+  slice_head(n = 15) %>%
+  ggplot(aes(x = reorder(French_Residence_Department, n), y = n)) +
+  geom_col(fill = "darkorange") +
+  coord_flip() +
+  labs(title = "15 départements les plus représentés", x = NULL, y = "Effectif") +
+  theme_minimal()
+
+#Age selon le sexe
+p6 =datap %>% filter(!is.na(Gender)) %>%
+  ggplot(aes(x = Gender, y = Age, fill = Gender)) +
+  geom_violin(alpha = 0.4, trim = FALSE) +
+  geom_boxplot(width = 0.15, outlier.alpha = 0.4) +
+  labs(title = "Age selon le sexe", x = NULL) +
+  theme_minimal() + theme(legend.position = "none")
+
+#Age selon la zone rurale/urbaine (hors non renseignés)
+p7= datap %>% filter(Rural != "Non renseigné") %>%
+  ggplot(aes(x = Rural, y = Age, fill = Rural)) +
+  geom_violin(alpha = 0.4, trim = FALSE) +
+  geom_boxplot(width = 0.15, outlier.alpha = 0.4) +
+  labs(title = "Age selon la zone (hors non renseignés)", x = NULL) +
+  theme_minimal() + theme(legend.position = "none")
+
+#Age selon la région
+p8 = ggplot(datap, aes(x = French_Region, y = Age, fill = French_Region)) +
+  geom_boxplot(outlier.alpha = 0.4) +
+  labs(title = "Age selon la région", x = NULL) +
+  theme_minimal() +
+  theme(legend.position = "none", axis.text.x = element_text(angle = 45, hjust = 1))
+
+#Age selon la région et le sexe
+p9 = datap %>% filter(!is.na(Gender)) %>%
+  ggplot(aes(x = French_Region, y = Age, fill = Gender)) +
+  geom_boxplot(outlier.alpha = 0.4) +
+  labs(title = "Age selon la région et le sexe", x = NULL) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+plots <- list(p1, p2, p3, p4, p5, p6, p7, p8, p9)
+for (p in plots) print(p)
+
+
+
+```
+
+### premières questions
+
+-   AGE : est-ce que les allergies se développent avec l'âge ou dès la naissance ? -lieu d'habitation : est-ce que l'environnement joue ?
+
+-   genre : est-ce qu'une femme est plus sujette à des allergies qu'un homme?

@@ -1,0 +1,25 @@
+# Data
+data/
+Data/
+donnees/
+*.csv
+*.tsv
+*.xlsx
+*.xls
+*.parquet
+*.rds
+*.RData
+*.sqlite
+*.db
+
+# Python / R / OS / IDE
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+.Rhistory
+.Rproj.user/
+.venv/
+.env
+.DS_Store
+.vscode/
+.idea/
